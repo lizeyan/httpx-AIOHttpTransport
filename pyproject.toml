@@ -5,21 +5,22 @@ description = "Use `aiohttp` with `httpx` Interface"
 authors = ["Zeyan Li <li_zeyan@icloud.com>"]
 license = "MIT"
 readme = "README.md"
-packages = [
-    { include = "httpx_aiohttp_transport" }
-]
+packages = [{ include = "httpx_aiohttp_transport" }]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.9"
 httpx = "^0.28.1"
 aiohttp = "^3.11.11"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.9.1"
-pyright = "^1.1.392.post0"
-mypy = "^1.14.1"
+pytest = "^8.3.5"
+aioresponses = "^0.7.8"
+pytest-asyncio = "^0.25.3"
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

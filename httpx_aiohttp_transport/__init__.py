@@ -8,57 +8,55 @@ import httpx
 from httpx import AsyncBaseTransport
 
 AIOHTTP_TO_HTTPX_EXCEPTIONS: dict[type[Exception], type[Exception]] = {
-    # 基础异常
-    aiohttp.ClientError: httpx.RequestError,
-    # 网络相关异常
-    aiohttp.ClientConnectionError: httpx.NetworkError,
+    # Order matters here, most specific exception first
+    aiohttp.ClientConnectorDNSError: httpx.ConnectError,
+    aiohttp.ClientProxyConnectionError: httpx.ProxyError,
+    aiohttp.ClientConnectorCertificateError: httpx.ProtocolError,
+    aiohttp.ClientSSLError: httpx.ProtocolError,
+    aiohttp.ServerFingerprintMismatch: httpx.ProtocolError,
+    aiohttp.ClientConnectionResetError: httpx.ConnectError,
     aiohttp.ClientConnectorError: httpx.ConnectError,
     aiohttp.ClientOSError: httpx.ConnectError,
-    aiohttp.ClientConnectionResetError: httpx.ConnectError,
-    # DNS相关异常
-    aiohttp.ClientConnectorDNSError: httpx.ConnectError,
-    # SSL相关异常
-    aiohttp.ClientSSLError: httpx.ProtocolError,
-    aiohttp.ClientConnectorCertificateError: httpx.ProtocolError,
-    aiohttp.ServerFingerprintMismatch: httpx.ProtocolError,
-    # 代理相关异常
-    aiohttp.ClientProxyConnectionError: httpx.ProxyError,
-    # 响应相关异常
-    aiohttp.ClientResponseError: httpx.HTTPStatusError,
-    aiohttp.ContentTypeError: httpx.DecodingError,
-    aiohttp.ClientPayloadError: httpx.ReadError,
-    # 连接断开异常
     aiohttp.ServerDisconnectedError: httpx.ReadError,
-    # URL相关异常
-    aiohttp.InvalidURL: httpx.InvalidURL,
-    # 重定向相关异常
+    aiohttp.ClientConnectionError: httpx.NetworkError,
+    aiohttp.ClientPayloadError: httpx.ReadError,
+    aiohttp.ContentTypeError: httpx.ReadError,
     aiohttp.TooManyRedirects: httpx.TooManyRedirects,
+    aiohttp.InvalidURL: httpx.InvalidURL,
+    aiohttp.ClientError: httpx.RequestError,
 }
 
 
-def map_aiohttp_exception(exc: Exception) -> Exception:
-    """
-    将 aiohttp 异常映射为对应的 httpx 异常
+async def transform_response_to_httpx(
+    aiohttp_response: aiohttp.ClientResponse, httpx_request: httpx.Request
+) -> httpx.Response:
+    content = await aiohttp_response.read()
+    headers = [
+        (k.lower(), v)
+        for k, v in aiohttp_response.headers.items()
+        if k.lower() != "content-encoding"
+    ]
 
-    Args:
-        exc: aiohttp 异常实例
+    return httpx.Response(
+        status_code=aiohttp_response.status,
+        headers=headers,
+        content=content,
+        request=httpx_request,
+    )
 
-    Returns:
-        对应的 httpx 异常实例
-    """
+
+async def map_aiohttp_exception(exc: Exception, httpx_request: httpx.Request) -> Exception:
     for aiohttp_exc, httpx_exc in AIOHTTP_TO_HTTPX_EXCEPTIONS.items():
         if isinstance(exc, aiohttp_exc):
             return httpx_exc(str(exc))
 
-    # 处理 asyncio 的超时异常
     if isinstance(exc, asyncio.TimeoutError):
         return httpx.TimeoutException(str(exc))
 
-    # 未知异常，包装为通用 HTTPError
     return httpx.HTTPError(f"Unknown error: {str(exc)}")
 
 
-class AiohttpTransport(AsyncBaseTransport):
+class AIOHTTPTransport(AsyncBaseTransport):
     def __init__(self, session: aiohttp.ClientSession | None = None):
         self._session = session or aiohttp.ClientSession()
         self._closed = False
@@ -77,19 +75,12 @@ class AiohttpTransport(AsyncBaseTransport):
         self._closed = True
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if (
-            _rsp := try_to_get_mocked_response(request)
-        ) is not None:  # 为了兼容RESPX mock
-            return _rsp
-
         if self._closed:
             raise RuntimeError("Transport is closed")
 
         try:
-            # 应用认证
             headers = dict(request.headers)
 
-            # 准备请求参数
             method = request.method
             url = str(request.url)
             content = request.content
@@ -101,30 +92,9 @@ class AiohttpTransport(AsyncBaseTransport):
                 data=content,
                 allow_redirects=True,
             ) as aiohttp_response:
-                # 读取响应内容
-                content = await aiohttp_response.read()
-
-                # 转换headers
-                new_headers = [
-                    (k.lower(), v)
-                    for k, v in aiohttp_response.headers.items()
-                    if k.lower() != "content-encoding"
-                ]
-
-                # 构建httpx.Response
-                return httpx.Response(
-                    status_code=aiohttp_response.status,
-                    headers=new_headers,
-                    content=content,
-                    request=request,
-                )
+                return await transform_response_to_httpx(aiohttp_response, request)
         except Exception as e:
-            raise map_aiohttp_exception(e) from e
-
-    async def aclose(self):
-        if not self._closed:
-            self._closed = True
-            await self._session.close()
+            raise await map_aiohttp_exception(e, request) from e
 
 
 mock_router: ContextVar[typing.Callable[[httpx.Request], httpx.Response]] = ContextVar(
@@ -172,7 +142,7 @@ def create_aiohttp_backed_httpx_client(
     return httpx.AsyncClient(
         base_url=base_url,
         verify=False,
-        transport=AiohttpTransport(
+        transport=AIOHTTPTransport(
             session=aiohttp.ClientSession(
                 proxy=proxy,
                 auth=auth,
