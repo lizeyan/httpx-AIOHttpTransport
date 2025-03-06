@@ -17,7 +17,7 @@ This package supports:
 - transport limits (max connection)
 - auth
 - proxy
-- `respx`. Run `mock_router.set(router.handler)` when you set up the respx mock router (see example). 
+- `respx`. Run `mock_router.set(router.handler)` when you set up the respx mock router (see example).
 
 Known limitations:
 

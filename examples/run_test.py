@@ -68,7 +68,7 @@ async def run_benchmark(requests=1000, rounds=3):
     print(f"开始测试 {requests} 并发请求...")
 
     for i in range(rounds):
-        print(f"\n第 {i+1} 轮测试:")
+        print(f"\n第 {i + 1} 轮测试:")
 
         # aiohttp 测试
         aiohttp_time = await benchmark_aiohttp(requests)
@@ -94,9 +94,7 @@ async def run_benchmark(requests=1000, rounds=3):
     print("\n测试结果汇总:")
     print(f"aiohttp 平均耗时: {statistics.mean(aiohttp_times):.2f} 秒")
     print(f"httpx 平均耗时: {statistics.mean(httpx_times):.2f} 秒")
-    print(
-        f"httpx (aiohttp transport) 平均耗时: {statistics.mean(httpx_aio_times):.2f} 秒"
-    )
+    print(f"httpx (aiohttp transport) 平均耗时: {statistics.mean(httpx_aio_times):.2f} 秒")
 
 
 if __name__ == "__main__":
