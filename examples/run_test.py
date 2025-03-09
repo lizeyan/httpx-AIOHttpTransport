@@ -60,7 +60,7 @@ async def benchmark_httpx_with_aiohttp_transport(n):
         return time.time() - start
 
 
-async def run_benchmark(requests=1000, rounds=3):
+async def run_benchmark(requests=1000, rounds=10):
     aiohttp_times = []
     httpx_times = []
     httpx_aio_times = []
@@ -68,7 +68,7 @@ async def run_benchmark(requests=1000, rounds=3):
     print(f"开始测试 {requests} 并发请求...")
 
     for i in range(rounds):
-        print(f"\n第 {i+1} 轮测试:")
+        print(f"\n第 {i + 1} 轮测试:")
 
         # aiohttp 测试
         aiohttp_time = await benchmark_aiohttp(requests)
@@ -101,4 +101,4 @@ async def run_benchmark(requests=1000, rounds=3):
 
 if __name__ == "__main__":
     # 运行基准测试
-    asyncio.run(run_benchmark(512))
+    asyncio.run(run_benchmark(1024))

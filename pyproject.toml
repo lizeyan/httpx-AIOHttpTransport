@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "httpx-aiohttptransport"
-version = "0.1.0"
+version = "0.2.0"
 description = "Use `aiohttp` with `httpx` Interface"
 authors = ["Zeyan Li <li_zeyan@icloud.com>"]
 license = "MIT"
@@ -10,7 +10,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.9"
 httpx = "^0.28.1"
 aiohttp = "^3.11.11"
 
@@ -19,7 +19,64 @@ aiohttp = "^3.11.11"
 ruff = "^0.9.1"
 pyright = "^1.1.392.post0"
 mypy = "^1.14.1"
+aioresponses = "^0.7.8"
+pytest = "^8.3.5"
+respx = "^0.22.0"
+pytest-asyncio = "^0.25.3"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+
+[tool.pyright]
+exclude = [
+    "examples/respx_example.py",
+    ".venv/**",
+]
+pythonVersion = "3.9"
+verboseOutput = true
+
+reportMissingImports = "error"
+reportAttributeAccessIssue = false
+reportWildcardImportFromLibrary = "error"
+reportMatchNotExhaustive = "error"
+
+reportInvalidStringEscapeSequence = "error"
+reportInvalidTypeVarUse = "error"
+reportSelfClsParameterName = "error"
+reportUnsupportedDunderAll = "error"
+reportUnusedImport = "error"
+reportDuplicateImport = "error"
+reportUnusedExpression = "error"
+reportConstantRedefinition = "error"
+reportIncompleteStub = "error"
+reportInconsistentConstructor = "error"
+reportInvalidStubStatement = "error"
+
+reportUntypedBaseClass = "error"
+reportUntypedClassDecorator = "none"
+reportUntypedFunctionDecorator = "none"
+reportUntypedNamedTuple = "error"
+
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
+
+reportUnusedCoroutine = "error"
+reportShadowedImports = "error"
+
+
+[tool.mypy]
+incremental = true
+cache_fine_grained = true
+exclude = [
+    "examples/respx_example.py",
+]
+follow_imports = "silent"
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true

@@ -1,38 +1,38 @@
 import asyncio
-import typing
+import typing_extensions as typing
 from contextvars import ContextVar
 from types import TracebackType
 
 import aiohttp
 import httpx
-from httpx import AsyncBaseTransport
+from httpx import AsyncBaseTransport, AsyncByteStream
+from yarl import URL
 
 AIOHTTP_TO_HTTPX_EXCEPTIONS: dict[type[Exception], type[Exception]] = {
-    # 基础异常
-    aiohttp.ClientError: httpx.RequestError,
-    # 网络相关异常
-    aiohttp.ClientConnectionError: httpx.NetworkError,
-    aiohttp.ClientConnectorError: httpx.ConnectError,
-    aiohttp.ClientOSError: httpx.ConnectError,
-    aiohttp.ClientConnectionResetError: httpx.ConnectError,
+    # Order matters here, most specific exception first
     # DNS相关异常
     aiohttp.ClientConnectorDNSError: httpx.ConnectError,
-    # SSL相关异常
-    aiohttp.ClientSSLError: httpx.ProtocolError,
-    aiohttp.ClientConnectorCertificateError: httpx.ProtocolError,
-    aiohttp.ServerFingerprintMismatch: httpx.ProtocolError,
     # 代理相关异常
     aiohttp.ClientProxyConnectionError: httpx.ProxyError,
-    # 响应相关异常
-    aiohttp.ClientResponseError: httpx.HTTPStatusError,
-    aiohttp.ContentTypeError: httpx.DecodingError,
-    aiohttp.ClientPayloadError: httpx.ReadError,
+    # SSL相关异常
+    aiohttp.ClientConnectorCertificateError: httpx.ProtocolError,
+    aiohttp.ClientSSLError: httpx.ProtocolError,
+    aiohttp.ServerFingerprintMismatch: httpx.ProtocolError,
+    # 网络相关异常
+    aiohttp.ClientConnectionResetError: httpx.ConnectError,
+    aiohttp.ClientConnectorError: httpx.ConnectError,
+    aiohttp.ClientOSError: httpx.ConnectError,
     # 连接断开异常
     aiohttp.ServerDisconnectedError: httpx.ReadError,
+    # 响应相关异常
+    aiohttp.ClientConnectionError: httpx.NetworkError,
+    aiohttp.ClientPayloadError: httpx.ReadError,
+    aiohttp.ContentTypeError: httpx.ReadError,
+    aiohttp.TooManyRedirects: httpx.TooManyRedirects,
     # URL相关异常
     aiohttp.InvalidURL: httpx.InvalidURL,
-    # 重定向相关异常
-    aiohttp.TooManyRedirects: httpx.TooManyRedirects,
+    # 基础异常
+    aiohttp.ClientError: httpx.RequestError,
 }
 
 
@@ -58,10 +58,34 @@ def map_aiohttp_exception(exc: Exception) -> Exception:
     return httpx.HTTPError(f"Unknown error: {str(exc)}")
 
 
+class AiohttpResponseStream(AsyncByteStream):
+    CHUNK_SIZE = 1024
+
+    def __init__(self, aiohttp_response: aiohttp.ClientResponse) -> None:
+        self._aiohttp_response = aiohttp_response
+
+    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+        async for chunk in self._aiohttp_response.content.iter_chunked(self.CHUNK_SIZE):
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._aiohttp_response.__aexit__(None, None, None)
+
+
 class AiohttpTransport(AsyncBaseTransport):
-    def __init__(self, session: aiohttp.ClientSession | None = None):
+    def __init__(
+        self,
+        session: typing.Optional[aiohttp.ClientSession] = None,
+        *,
+        no_cookie: bool = True,
+    ):
         self._session = session or aiohttp.ClientSession()
         self._closed = False
+        self._no_cookie = no_cookie
+
+        self._excluded_response_headers = {"content-encoding"}
+        if self._no_cookie:
+            self._excluded_response_headers.add("set-cookie")
 
     async def __aenter__(self) -> typing.Self:
         await self._session.__aenter__()
@@ -69,9 +93,9 @@ class AiohttpTransport(AsyncBaseTransport):
 
     async def __aexit__(
         self,
-        exc_type: type[BaseException] | None = None,
-        exc_value: BaseException | None = None,
-        traceback: TracebackType | None = None,
+        exc_type: typing.Optional[type[BaseException]] = None,
+        exc_value: typing.Optional[BaseException] = None,
+        traceback: typing.Optional[TracebackType] = None,
     ):
         await self._session.__aexit__(exc_type, exc_value, traceback)
         self._closed = True
@@ -86,38 +110,52 @@ class AiohttpTransport(AsyncBaseTransport):
             raise RuntimeError("Transport is closed")
 
         try:
-            # 应用认证
-            headers = dict(request.headers)
-
             # 准备请求参数
-            method = request.method
-            url = str(request.url)
+            url = URL.build(
+                scheme=request.url.scheme,
+                user=request.url.username or None,
+                password=request.url.password or None,
+                host=request.url.host,
+                port=request.url.port,
+                path=request.url.path,
+                query_string=request.url.query.decode("utf-8"),
+                fragment=request.url.fragment,
+            )
+
             content = request.content
 
-            async with self._session.request(
-                method=method,
+            response = await self._session.request(
+                method=request.method,
                 url=url,
-                headers=headers,
+                headers=request.headers,
                 data=content,
                 allow_redirects=True,
-            ) as aiohttp_response:
-                # 读取响应内容
-                content = await aiohttp_response.read()
+                skip_auto_headers={
+                    "content-encoding",
+                    "accept-encoding",
+                    "user-agent",
+                    "connection",
+                    "deflate",
+                    "accept",
+                },
+            ).__aenter__()
 
-                # 转换headers
-                new_headers = [
-                    (k.lower(), v)
-                    for k, v in aiohttp_response.headers.items()
-                    if k.lower() != "content-encoding"
-                ]
+            content_stream = AiohttpResponseStream(response)
 
-                # 构建httpx.Response
-                return httpx.Response(
-                    status_code=aiohttp_response.status,
-                    headers=new_headers,
-                    content=content,
-                    request=request,
-                )
+            # 转换headers
+            response_headers = [
+                (k, v)
+                for k, v in [(k.lower(), v) for k, v in response.headers.items()]
+                if k not in self._excluded_response_headers
+            ]
+
+            # 构建httpx.Response
+            return httpx.Response(
+                status_code=response.status,
+                headers=response_headers,
+                content=content_stream,
+                request=request,
+            )
         except Exception as e:
             raise map_aiohttp_exception(e) from e
 
@@ -132,7 +170,9 @@ mock_router: ContextVar[typing.Callable[[httpx.Request], httpx.Response]] = Cont
 )
 
 
-def try_to_get_mocked_response(request: httpx.Request) -> httpx.Response | None:
+def try_to_get_mocked_response(
+    request: httpx.Request,
+) -> typing.Optional[httpx.Response]:
     try:
         _mock_handler = mock_router.get()
     except LookupError:
@@ -142,18 +182,19 @@ def try_to_get_mocked_response(request: httpx.Request) -> httpx.Response | None:
 
 def create_aiohttp_backed_httpx_client(
     *,
-    headers: dict[str, str] | None = None,
-    total_timeout: float | None = None,
+    headers: typing.Optional[dict[str, str]] = None,
+    total_timeout: typing.Optional[float] = None,
     base_url: str = "",
-    proxy: str | None = None,
+    proxy: typing.Optional[str] = None,
     keepalive_timeout: float = 15,
     max_connections: int = 100,
     max_connections_per_host: int = 0,
     verify_ssl: bool = False,
-    login: str | None = None,
-    password: str | None = None,
+    login: typing.Optional[str] = None,
+    password: typing.Optional[str] = None,
     encoding: str = "latin1",
     force_close: bool = False,
+    no_cookie: bool = True,
 ) -> httpx.AsyncClient:
     timeout = aiohttp.ClientTimeout(total=total_timeout)
     connector = aiohttp.TCPConnector(
@@ -179,7 +220,9 @@ def create_aiohttp_backed_httpx_client(
                 timeout=timeout,
                 connector=connector,
                 headers=headers,
-            )
+                cookie_jar=aiohttp.DummyCookieJar() if no_cookie else None,
+            ),
+            no_cookie=no_cookie,
         ),
     )
 

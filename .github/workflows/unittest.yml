@@ -1,4 +1,4 @@
-name: Pre-commit Checks
+name: Unittest
 
 on:
   push:
@@ -9,13 +9,20 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+      fail-fast: false
+
+    name: Lint with Python ${{ matrix.python-version }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -29,7 +36,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
 
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
@@ -37,17 +44,20 @@ jobs:
 
       - name: Run ruff format
         run: |
-          poetry run ruff format --check httpx_aiohttp_transport/
+          poetry run ruff format --check .
 
       - name: Run ruff check
         run: |
-          poetry run ruff check httpx_aiohttp_transport/
+          poetry run ruff check .
 
       - name: Run pyright
         run: |
-          poetry run pyright httpx_aiohttp_transport/
+          poetry run pyright .
 
       - name: Run mypy
         run: |
-          poetry run python -m mypy httpx_aiohttp_transport/
+          poetry run python -m mypy .
 
+      - name: Pytest
+        run: |
+          poetry run python -m pytest tests
