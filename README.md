@@ -1,3 +1,11 @@
+[![codecov](https://codecov.io/gh/lizeyan/httpx-AIOHttpTransport/graph/badge.svg?token=N0RSAD0V7C)](https://codecov.io/gh/lizeyan/httpx-AIOHttpTransport)
+[![PyPI version](https://badge.fury.io/py/httpx-aiohttptransport.svg)](https://badge.fury.io/py/httpx-aiohttptransport)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/httpx-aiohttptransport.svg)](https://pypi.org/project/httpx-aiohttptransport/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/httpx-aiohttptransport.svg)](https://pypi.org/project/httpx-aiohttptransport/)
+[![PyPI - License](https://img.shields.io/pypi/l/httpx-aiohttptransport.svg)](https://pypi.org/project/httpx-aiohttptransport/)
+[![Code style: black](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
+
 # Use `aiohttp` with `httpx` Interface
 
 `httpx` has performance issue, especially when working with high concurrency, while `aiohttp` does not.

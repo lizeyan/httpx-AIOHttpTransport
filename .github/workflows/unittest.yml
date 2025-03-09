@@ -60,4 +60,9 @@ jobs:
 
       - name: Pytest
         run: |
-          poetry run python -m pytest tests
+          poetry run python -m pytest tests --cov=. --cov-branch --cov-report=xml
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
