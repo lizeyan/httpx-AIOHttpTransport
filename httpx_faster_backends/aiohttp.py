@@ -1,5 +1,4 @@
 import asyncio
-from contextvars import ContextVar
 from types import TracebackType
 
 import aiohttp
@@ -9,6 +8,8 @@ import httpx._urls
 import typing_extensions as typing
 from httpx import AsyncBaseTransport, AsyncByteStream
 from yarl import URL
+
+from httpx_faster_backends.mock import try_to_get_mocked_response
 
 AIOHTTP_TO_HTTPX_EXCEPTIONS: dict[type[Exception], type[Exception]] = {
     # Order matters here, most specific exception first
@@ -184,21 +185,6 @@ class AiohttpTransport(AsyncBaseTransport):
             await self._session.close()
 
 
-mock_router: ContextVar[typing.Callable[[httpx.Request], httpx.Response]] = ContextVar(
-    "mock_router"
-)
-
-
-def try_to_get_mocked_response(
-    request: httpx.Request,
-) -> typing.Optional[httpx.Response]:
-    try:
-        _mock_handler = mock_router.get()
-    except LookupError:
-        return None
-    return _mock_handler(request)
-
-
 def create_aiohttp_backed_httpx_client(
     *,
     headers: typing.Optional[dict[str, str]] = None,
@@ -249,5 +235,4 @@ def create_aiohttp_backed_httpx_client(
 
 __all__ = [
     "create_aiohttp_backed_httpx_client",
-    "mock_router",
 ]

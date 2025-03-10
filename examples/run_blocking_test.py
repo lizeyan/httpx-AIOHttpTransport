@@ -4,7 +4,7 @@ import threading
 import time
 import typing
 
-from httpx_aiohttp_transport import create_aiohttp_backed_httpx_client
+from httpx_faster_backends import create_aiohttp_backed_httpx_client
 
 
 def format_thread_stack(thread_id: int, *, limit: int = 100) -> typing.Optional[str]:

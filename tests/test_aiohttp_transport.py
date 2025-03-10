@@ -6,12 +6,12 @@ import pytest
 import respx
 from aioresponses import aioresponses
 
-from httpx_aiohttp_transport import (
+from httpx_faster_backends.aiohttp import (
     AiohttpResponseStream,
     AiohttpTransport,
     create_aiohttp_backed_httpx_client,
-    mock_router,
 )
+from httpx_faster_backends.mock import mock_router
 
 
 class TestAiohttpResponseStream:
@@ -194,7 +194,7 @@ class TestMockRouter:
 
     def test_try_to_get_mocked_response_no_mock(self):
         """Test that None is returned when no mock is set."""
-        from httpx_aiohttp_transport import try_to_get_mocked_response
+        from httpx_faster_backends.mock import try_to_get_mocked_response
 
         request = httpx.Request("GET", "https://example.com")
         result = try_to_get_mocked_response(request)

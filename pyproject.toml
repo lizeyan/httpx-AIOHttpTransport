@@ -1,18 +1,19 @@
 [tool.poetry]
-name = "httpx-aiohttptransport"
-version = "0.2.1"
-description = "Use `aiohttp` with `httpx` Interface"
+name = "httpx-faster-backends"
+version = "0.1.0"
+description = "Use faster backends with `httpx` Interface"
 authors = ["Zeyan Li <li_zeyan@icloud.com>"]
 license = "MIT"
 readme = "README.md"
 packages = [
-    { include = "httpx_aiohttp_transport" }
+    { include = "httpx_faster_backends" }
 ]
 
 [tool.poetry.dependencies]
 python = ">=3.9"
 httpx = "^0.28.1"
 aiohttp = "^3.11.11"
+pycurl = "^7.45.6"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -24,6 +25,7 @@ pytest = "^8.3.5"
 respx = "^0.22.0"
 pytest-asyncio = "^0.25.3"
 pytest-cov = "^6.0.0"
+types-pycurl = "^7.45.6.20250309"
 
 [build-system]
 requires = ["poetry-core"]
