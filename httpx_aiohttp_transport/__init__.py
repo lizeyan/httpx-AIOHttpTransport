@@ -1,10 +1,12 @@
 import asyncio
-import typing_extensions as typing
 from contextvars import ContextVar
 from types import TracebackType
 
 import aiohttp
 import httpx
+import httpx._urlparse
+import httpx._urls
+import typing_extensions as typing
 from httpx import AsyncBaseTransport, AsyncByteStream
 from yarl import URL
 
@@ -72,16 +74,39 @@ class AiohttpResponseStream(AsyncByteStream):
         await self._aiohttp_response.__aexit__(None, None, None)
 
 
+SKIP_AUTO_HEADERS = frozenset(
+    {
+        "content-encoding",
+        "accept-encoding",
+        "user-agent",
+        "connection",
+        "deflate",
+        "accept",
+    }
+)
+
+
 class AiohttpTransport(AsyncBaseTransport):
+    __slots__ = (
+        "_session",
+        "_closed",
+        "_no_cookie",
+        "_verify_ssl",
+        "_excluded_response_headers",
+        "_ssl_context",
+    )
+
     def __init__(
         self,
         session: typing.Optional[aiohttp.ClientSession] = None,
         *,
         no_cookie: bool = True,
+        verify_ssl: bool = False,
     ):
         self._session = session or aiohttp.ClientSession()
         self._closed = False
         self._no_cookie = no_cookie
+        self._verify_ssl = verify_ssl
 
         self._excluded_response_headers = {"content-encoding"}
         if self._no_cookie:
@@ -130,14 +155,8 @@ class AiohttpTransport(AsyncBaseTransport):
                 headers=request.headers,
                 data=content,
                 allow_redirects=True,
-                skip_auto_headers={
-                    "content-encoding",
-                    "accept-encoding",
-                    "user-agent",
-                    "connection",
-                    "deflate",
-                    "accept",
-                },
+                skip_auto_headers=SKIP_AUTO_HEADERS,
+                ssl=self._verify_ssl,
             ).__aenter__()
 
             content_stream = AiohttpResponseStream(response)
@@ -201,7 +220,7 @@ def create_aiohttp_backed_httpx_client(
         keepalive_timeout=keepalive_timeout if not force_close else None,
         limit=max_connections,
         limit_per_host=max_connections_per_host,
-        ssl=verify_ssl,
+        verify_ssl=verify_ssl,
         enable_cleanup_closed=True,
         force_close=force_close,
         ttl_dns_cache=None,
@@ -212,7 +231,7 @@ def create_aiohttp_backed_httpx_client(
         auth = None
     return httpx.AsyncClient(
         base_url=base_url,
-        verify=False,
+        verify=verify_ssl,
         transport=AiohttpTransport(
             session=aiohttp.ClientSession(
                 proxy=proxy,
@@ -223,6 +242,7 @@ def create_aiohttp_backed_httpx_client(
                 cookie_jar=aiohttp.DummyCookieJar() if no_cookie else None,
             ),
             no_cookie=no_cookie,
+            verify_ssl=verify_ssl,
         ),
     )
 

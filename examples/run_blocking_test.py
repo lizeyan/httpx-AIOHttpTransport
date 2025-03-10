@@ -75,7 +75,7 @@ class EventLoopBlockingDetector:
         ).result()
 
         while self.running:
-            time.sleep(0.05)  # 监控间隔
+            time.sleep(self.threshold / 10)  # 监控间隔
 
             # 检查tick是否更新
             current_tick = self._loop_tick
@@ -130,7 +130,7 @@ async def benchmark_httpx_with_aiohttp_transport(n):
 
 def main():
     eventloop = asyncio.new_event_loop()
-    EventLoopBlockingDetector(eventloop=eventloop, threshold=0.001).start()
+    EventLoopBlockingDetector(eventloop=eventloop, threshold=1e-2).start()
     eventloop.run_until_complete(benchmark_httpx_with_aiohttp_transport(1024))
 
 
