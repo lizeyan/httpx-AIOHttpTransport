@@ -1,111 +1,148 @@
 import asyncio
 import io
-from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from types import TracebackType
-from typing import Optional, Dict, Callable
+from typing import Dict, NamedTuple, Optional, Self, Callable
 
 import httpx
 import pycurl
-import typing_extensions as typing
-from httpx import AsyncBaseTransport, AsyncByteStream
-
-from httpx_faster_backends.curl_connections import CurlConnectionPool, PooledCurl
-
-_executor = ThreadPoolExecutor(max_workers=100)
-
-# PyCURL到HTTPX异常映射
-PYCURL_TO_HTTPX_EXCEPTIONS: Dict[int, type[Exception]] = {
-    # DNS相关错误
-    pycurl.E_COULDNT_RESOLVE_PROXY: httpx.ProxyError,
-    pycurl.E_COULDNT_RESOLVE_HOST: httpx.ConnectError,
-    # 连接错误
-    pycurl.E_COULDNT_CONNECT: httpx.ConnectError,
-    pycurl.E_OPERATION_TIMEDOUT: httpx.TimeoutException,
-    pycurl.E_SEND_ERROR: httpx.WriteError,
-    pycurl.E_RECV_ERROR: httpx.ReadError,
-    # SSL错误
-    pycurl.E_SSL_CONNECT_ERROR: httpx.ProtocolError,
-    pycurl.E_SSL_CERTPROBLEM: httpx.ProtocolError,
-    pycurl.E_SSL_CIPHER: httpx.ProtocolError,
-    pycurl.E_PEER_FAILED_VERIFICATION: httpx.ProtocolError,
-    # 重定向错误
-    pycurl.E_TOO_MANY_REDIRECTS: httpx.TooManyRedirects,
-    # URL错误
-    pycurl.E_URL_MALFORMAT: httpx.InvalidURL,
-    # 其它错误
-    pycurl.E_ABORTED_BY_CALLBACK: httpx.RequestError,
-}
+from httpx import AsyncBaseTransport
 
 
-def map_pycurl_exception(exc: pycurl.error) -> Exception:
-    """
-    将PyCURL异常映射为对应的HTTPX异常
+class Handle(NamedTuple):
+    future: asyncio.Future
+    buffer: io.BytesIO
+    headers: Dict[str, str]
+    request: httpx.Request
 
-    Args:
-        exc: PyCURL异常实例
+class MultiHandler:
+    def __init__(self):
+        self.multi = pycurl.CurlMulti()
+        self.handles: Dict[pycurl.Curl, Handle] = {}
+        self.loop = asyncio.get_event_loop()
+        self.multi.setopt(pycurl.M_SOCKETFUNCTION, self._socket_callback)
+        self.multi.setopt(pycurl.M_TIMERFUNCTION, self._timer_callback)
+        # self._timer_task = self.loop.create_task(self._on_timer())
 
-    Returns:
-        对应的HTTPX异常实例
-    """
-    error_code, error_msg = exc.args
+    def _socket_callback(self, event, fd, multi, data):
+        # 使用位运算替代多个if判断
+        if event & (pycurl.POLL_IN | pycurl.POLL_OUT):
+            if event & pycurl.POLL_IN:
+                self.loop.add_reader(fd, self._socket_action, fd, pycurl.CSELECT_IN)
+            if event & pycurl.POLL_OUT:
+                self.loop.add_writer(fd, self._socket_action, fd, pycurl.CSELECT_OUT)
+        elif event == pycurl.POLL_REMOVE:
+            self.loop.remove_reader(fd)
+            self.loop.remove_writer(fd)
 
-    # 查找映射的异常类型
-    httpx_exc = PYCURL_TO_HTTPX_EXCEPTIONS.get(error_code, httpx.HTTPError)
-    return httpx_exc(f"PyCURL error ({error_code}): {error_msg}")
+    def _timer_callback(self, timeout_ms):
+        # PyCURL要求实现这个函数，即使我们不使用timeout_ms
+        pass
 
+    def _socket_action(self, fd, flags):
+        ret, _ = self.multi.socket_action(fd, flags)
+        self._check_multi_info()
 
-class PyCURLResponseStream(AsyncByteStream):
-    """处理PyCURL响应内容的异步流"""
-
-    def __init__(self, response_data: bytes) -> None:
-        self.response_data = response_data
-        self.stream = io.BytesIO(response_data)
-        self.chunk_size = 65536  # 64KB chunks
-
-    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
-        # 已经有全部数据，按块返回
-        self.stream.seek(0)
+    async def _on_timer(self):
         while True:
-            chunk = self.stream.read(self.chunk_size)
-            if not chunk:
+            ret, _ = self.multi.socket_action(pycurl.SOCKET_TIMEOUT, 0)
+            self._check_multi_info()
+            await asyncio.sleep(0)
+
+    def _check_multi_info(self):
+        # 批量处理完成的请求
+        completed_requests = []
+        while True:
+            num_q, ok_list, err_list = self.multi.info_read(1024)
+            
+            for curl in ok_list:
+                self._handle_completed(curl)
+            for curl, errnum, errmsg in err_list:
+                self._handle_failed(curl, errnum, errmsg)
+            if num_q == 0:
                 break
-            yield chunk
 
-    async def aclose(self) -> None:
-        # 关闭流
-        self.stream.close()
+    def _handle_completed(self, curl: pycurl.Curl):
+        handle = self.handles.pop(curl, None)
+        if handle and not handle.future.done():
+            status_code = curl.getinfo(pycurl.RESPONSE_CODE)
+            content = handle.buffer.getvalue()
+            response = httpx.Response(
+                status_code=status_code,
+                headers=handle.headers,
+                content=content,
+                request=handle.request,
+            )
+            handle.future.set_result(response)
+        self.multi.remove_handle(curl)
+
+    def _handle_failed(self, curl: pycurl.Curl, errnum: int, errmsg: str):
+        handle = self.handles.pop(curl, None)
+        if handle and not handle.future.done():
+            exc = map_pycurl_exception(pycurl.error(errnum, errmsg))
+            handle.future.set_exception(exc)
+        self.multi.remove_handle(curl)
+
+    async def add_request(self, curl: pycurl.Curl, request: httpx.Request) -> httpx.Response:
+        future = self.loop.create_future()
+        buffer = io.BytesIO()
+        headers = {}
+
+        curl.setopt(pycurl.WRITEDATA, buffer)
+        curl.setopt(pycurl.HEADERFUNCTION, lambda header: _parse_header(header, headers))
+
+        self.handles[curl] = Handle(future, buffer, headers, request)
+        self.multi.add_handle(curl)
+
+        # 手动触发一次socket_action启动请求
+        self.loop.call_soon(self._socket_action, pycurl.SOCKET_TIMEOUT, 0)
+
+        return await future
+
+    async def close(self):
+        # 取消并等待timer task完成
+        # self._timer_task.cancel()
+        # try:
+        #     await self._timer_task
+        # except asyncio.CancelledError:
+        #     pass
+    
+        # 清理所有remaining handles
+        for curl in list(self.handles.keys()):
+            handle = self.handles[curl]
+            if not handle.future.done():
+                handle.future.cancel()
+            self.multi.remove_handle(curl)
+            curl.close()
+        self.handles.clear()
+    
+        # 清理multi对象
+        self.multi.close()
 
 
+# 辅助函数
 def _parse_header(header_line: bytes, headers: dict[str, str]) -> None:
-    # HTTP standard specifies that headers are encoded in iso-8859-1.
-    # On Python 2, decoding step can be skipped.
-    # On Python 3, decoding step is required.
     header_line_str = header_line.decode("iso-8859-1")
-
-    # Header lines include the first status line (HTTP/1.x ...).
-    # We are going to ignore all lines that don't have a colon in them.
-    # This will botch headers that are split on multiple lines...
     if ":" not in header_line_str:
         return
-
-    # Break the header line into header name and value.
     name, value = header_line_str.split(":", 1)
+    headers[name.strip().lower()] = value.strip()
 
-    # Remove whitespace that may be present.
-    # Header lines include the trailing newline, and there may be whitespace
-    # around the colon.
-    name = name.strip()
-    value = value.strip()
-
-    # Header names are case insensitive.
-    # Lowercase name here.
-    name = name.lower()
-
-    # Now we can actually record the header name and value.
-    # Note: this only works when headers are not duplicated, see below.
-    headers[name] = value
-            
+def map_pycurl_exception(exc: pycurl.error) -> Exception:
+    error_code, error_msg = exc.args
+    PYCURL_TO_HTTPX_EXCEPTIONS = {
+        pycurl.E_COULDNT_RESOLVE_PROXY: httpx.ProxyError,
+        pycurl.E_COULDNT_RESOLVE_HOST: httpx.ConnectError,
+        pycurl.E_COULDNT_CONNECT: httpx.ConnectError,
+        pycurl.E_OPERATION_TIMEDOUT: httpx.TimeoutException,
+        pycurl.E_SEND_ERROR: httpx.WriteError,
+        pycurl.E_RECV_ERROR: httpx.ReadError,
+        pycurl.E_SSL_CONNECT_ERROR: httpx.ProtocolError,
+        pycurl.E_TOO_MANY_REDIRECTS: httpx.TooManyRedirects,
+        pycurl.E_URL_MALFORMAT: httpx.InvalidURL,
+    }
+    httpx_exc = PYCURL_TO_HTTPX_EXCEPTIONS.get(error_code, httpx.HTTPError)
+    return httpx_exc(f"PyCURL error ({error_code}): {error_msg}")
 
 class PyCURLTransport(AsyncBaseTransport):
     """基于PyCURL的HTTPX异步传输层"""
@@ -115,7 +152,7 @@ class PyCURLTransport(AsyncBaseTransport):
             *,
             max_workers: int = 10,
             max_connections_per_host: int = 0,
-            max_connections: int = 100,
+            max_connections: int = 1000,
             verify_ssl: bool = True,
             timeout: Optional[float] = None,
             proxy: Optional[str] = None,
@@ -127,66 +164,27 @@ class PyCURLTransport(AsyncBaseTransport):
             max_idle_time: float = 60,
             cleanup_interval: float = 30
     ):
-        self._max_workers = max_workers
-        self._verify_ssl = verify_ssl
-        self._closed = False
-        self._timeout = timeout
-        self._proxy = proxy
-        self._interface = interface
-        self._follow_redirects = follow_redirects
-        self._max_redirects = max_redirects
-        self._cookies_enabled = cookies_enabled
-        self._default_headers = default_headers or {}
+        self.base_curl = pycurl.Curl()
+        self.base_curl.setopt(pycurl.SSL_VERIFYPEER, 1 if verify_ssl else 0)
+        self.base_curl.setopt(pycurl.SSL_VERIFYHOST, 2 if verify_ssl else 0)
+        self.base_curl.setopt(pycurl.PROXY, proxy) if proxy else None
+        self.base_curl.setopt(pycurl.INTERFACE, interface) if interface else None
+        self.base_curl.setopt(pycurl.FOLLOWLOCATION, 1 if follow_redirects else 0)
+        self.base_curl.setopt(pycurl.MAXREDIRS, max_redirects if follow_redirects else 0)
+        self.base_curl.setopt(pycurl.TCP_KEEPALIVE, 1)
+        self.base_curl.setopt(pycurl.TCP_KEEPIDLE, 120)
+        self.base_curl.setopt(pycurl.TCP_KEEPINTVL, 60)
+        self.base_curl.setopt(pycurl.FRESH_CONNECT, 0)
+        self.base_curl.setopt(pycurl.FORBID_REUSE, 0)
+        self.base_curl.setopt(pycurl.MAXCONNECTS, max_connections)
+        self.base_curl.setopt(pycurl.CONNECTTIMEOUT, timeout) if timeout else None
 
-        # 创建连接池
-        self._pool = CurlConnectionPool(
-            max_total_connections=max_connections,
-            max_connections_per_host=max_connections_per_host,
-            max_idle_time=max_idle_time,
-            cleanup_interval=cleanup_interval
-        )
-        self._initialize_pool()
-
-        self._excluded_response_headers = {"content-encoding"}
-        if not cookies_enabled:
-            self._excluded_response_headers.add("set-cookie")
-
-    def _initialize_pool(self) -> None:
-        """初始化连接池的基础配置"""
-        options = {
-            # 基础配置
-            'SSL_VERIFYPEER': 1 if self._verify_ssl else 0,
-            'SSL_VERIFYHOST': 2 if self._verify_ssl else 0,
-            'FOLLOWLOCATION': 1 if self._follow_redirects else 0,
-            'MAXREDIRS': self._max_redirects if self._follow_redirects else 0,
-    
-            # 连接复用相关配置
-            'TCP_KEEPALIVE': 1,  # 启用TCP keepalive
-            'TCP_KEEPIDLE': 120,  # keepalive空闲时间
-            'TCP_KEEPINTVL': 60,  # keepalive间隔
-    
-            # 连接池相关配置
-            'FRESH_CONNECT': 0,  # 允许复用连接
-            'FORBID_REUSE': 0,  # 允许连接复用
-        }
-    
-        if self._timeout:
-            options['TIMEOUT_MS'] = int(self._timeout * 1000)
-            options['CONNECTTIMEOUT_MS'] = int(min(self._timeout * 1000, 30000))
-    
-        if self._proxy:
-            options['PROXY'] = self._proxy
-    
-        if self._interface:
-            options['INTERFACE'] = self._interface
-    
-        self._pool.initialize(**options)
+        self._multi_handler = MultiHandler()
 
     def _prepare_curl_for_request(
-            self, pooled_curl: PooledCurl, request: httpx.Request
-    ) -> None:
-        """为特定请求准备curl句柄"""
-        curl = pooled_curl.curl
+            self, request: httpx.Request
+    ) -> pycurl.Curl:
+        curl = self.base_curl.duphandle()
 
         # 设置URL
         curl.setopt(pycurl.URL, str(request.url))
@@ -206,50 +204,9 @@ class PyCURLTransport(AsyncBaseTransport):
         for name, value in request.headers.items():
             headers.append(f"{name}: {value}")
         curl.setopt(pycurl.HTTPHEADER, headers)
+        return curl
 
-    def _perform_request(self, request: httpx.Request) -> httpx.Response:
-        """执行PyCURL请求并返回响应"""
-        pooled_curl = self._pool.get_curl(str(request.url))
-
-        try:
-            # 准备请求特定配置
-            self._prepare_curl_for_request(pooled_curl, request)
-
-            # 设置响应处理
-            response_headers: dict[str, str] = {}
-            pooled_curl.curl.setopt(
-                pycurl.HEADERFUNCTION,
-                lambda header: _parse_header(header, response_headers),
-            )
-
-            body_buffer = io.BytesIO()
-            pooled_curl.curl.setopt(pycurl.WRITEDATA, body_buffer)
-
-            # 执行请求
-            pooled_curl.curl.perform()
-
-            # 获取响应状态码
-            status_code = pooled_curl.curl.getinfo(pycurl.RESPONSE_CODE)
-
-            # 获取响应体
-            body_buffer.seek(0)
-            content = body_buffer.getvalue()
-
-            # 创建响应流
-            content_stream = PyCURLResponseStream(content)
-
-            return httpx.Response(
-                status_code=status_code,
-                headers=response_headers,
-                content=content_stream,
-                request=request,
-            )
-
-        finally:
-            # 归还curl句柄到连接池
-            self._pool.return_curl(pooled_curl)
-
-    async def __aenter__(self) -> typing.Self:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(
@@ -262,33 +219,24 @@ class PyCURLTransport(AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """处理异步HTTP请求"""
-
-        # 检查是否有模拟响应
         if (_rsp := try_to_get_mocked_response(request)) is not None:
             return _rsp
 
-        if self._closed:
-            raise RuntimeError("Transport is closed")
-
         try:
-            # 使用线程池运行PyCURL请求
-            response_data = await asyncio.get_running_loop().run_in_executor(
-                _executor, self._perform_request, request
+            response = await self._multi_handler.add_request(
+                self._prepare_curl_for_request(request), request
             )
-            return response_data
+            return response
         except pycurl.error as e:
-            # 将PyCURL异常映射为HTTPX异常
             raise map_pycurl_exception(e) from e
         except Exception as e:
-            # 处理其他异常
             if isinstance(e, asyncio.TimeoutError):
                 raise httpx.TimeoutException(str(e))
             raise httpx.HTTPError(f"Unknown error: {str(e)}")
 
     async def aclose(self) -> None:
         """关闭传输层并清理资源"""
-        if not self._closed:
-            self._closed = True
+        await self._multi_handler.close()
 
 
 # 响应模拟支持，与aiohttp版本兼容
